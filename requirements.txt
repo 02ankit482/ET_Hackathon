@@ -1,26 +1,68 @@
-# Core RAG & Embeddings
-chromadb
-sentence-transformers==3.0.1
-langchain==0.2.12
-langchain-community==0.2.11
-langchain-text-splitters==0.2.2
+# ─────────────────────────────────────────────────────────────
+# requirements.txt — Finance RAG + CrewAI
+# Python 3.10.x | Windows
+#
+# INSTALL IN THIS ORDER (mandatory — read below):
+#
+#   Step 1:  pip install -r requirements.txt
+#   Step 2:  pip install crewai==0.86.0 --no-deps
+#   Step 3:  pip install litellm opentelemetry-api opentelemetry-sdk
+#
+# WHY:
+#   - CrewAI's version numbering skipped 0.12–0.85 on PyPI.
+#     The real versions are 0.11.x then 0.86.x then 1.x.
+#   - crewai>=0.86 is INDEPENDENT of LangChain (built from scratch).
+#     Do NOT install langchain and crewai together via normal pip —
+#     pip will try to satisfy crewai's chromadb>=1.0 requirement which
+#     clashes with your 0.5.23 pin. --no-deps bypasses this.
+#   - chromadb==0.5.23 is the last pure-Python backend.
+#     0.6+ uses Rust bindings that crash on Windows Python 3.10.
+#   - sentence-transformers 2.7.0 is the last version compatible with
+#     chromadb 0.5.23's tokenizers<=0.20 ceiling.
+#   - crewai-tools is NOT included — it pins exact crewai versions
+#     and pulls embedchain which requires chromadb<0.5.0.
+#     Our code uses crewai.tools.BaseTool directly (no crewai-tools needed).
+#   - fastapi 0.111.0 + starlette 0.37.2 are pinned together because
+#     fastapi 0.115 passes on_startup kwarg removed in starlette 0.41+.
+# ─────────────────────────────────────────────────────────────
 
-# Document Loaders
+# ── Vector DB (pure-Python backend, Windows Python 3.10 safe) ─
+chromadb==0.5.23
+
+# ── Embeddings (tokenizers ceiling matches chromadb 0.5.23) ───
+sentence-transformers==2.7.0
+tokenizers==0.20.3
+
+# ── LangChain (for your ingest + retriever pipeline only) ─────
+langchain==0.2.16
+langchain-community==0.2.16
+langchain-text-splitters==0.2.4
+
+# ── Document Loaders ──────────────────────────────────────────
 pypdf==4.3.1
 python-docx==1.1.2
 unstructured==0.15.0
 
-# Hybrid Search (BM25)
+# ── Hybrid Search ─────────────────────────────────────────────
 rank_bm25==0.2.2
 
-# Gemini API (Google Generative AI)
+# ── Gemini API ────────────────────────────────────────────────
 google-generativeai==0.7.2
 
-# Demo Web Server / Frontend
-fastapi==0.115.0
+# ── CrewAI: install AFTER this file with --no-deps (see above) ─
+# Run manually:
+#   pip install crewai==0.86.0 --no-deps
+#   pip install litellm opentelemetry-api opentelemetry-sdk
+
+# ── Web Server ────────────────────────────────────────────────
+fastapi==0.111.0
+starlette==0.37.2
 uvicorn[standard]==0.30.6
 
-# Utilities
+# ── Utilities ─────────────────────────────────────────────────
 python-dotenv==1.0.1
 rich==13.7.1
 pydantic==2.8.2
+
+# crew ai
+crewai==0.86.0

@@ -273,3 +273,9 @@ if __name__ == "__main__":
                         help="Folder containing PDF/TXT/DOCX files")
     args = parser.parse_args()
     ingest_documents(args.docs_dir)
+
+
+
+
+
+#uvicorn server:app --reload --host 127.0.0.1 --port 800
