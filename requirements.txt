@@ -1,44 +1,29 @@
 # ─────────────────────────────────────────────────────────────
 # requirements.txt — Finance RAG + CrewAI
-# Python 3.10.x | Windows
+# Target: Python 3.12.x | Linux (Render) & Windows local
 #
-# INSTALL IN THIS ORDER (mandatory — read below):
+# IMPORTANT: Pin Python to 3.12 on Render by adding a
+# .python-version file to your repo root containing: 3.12.7
 #
-#   Step 1:  pip install -r requirements.txt
-#   Step 2:  pip install crewai==0.86.0 --no-deps
-#   Step 3:  pip install litellm opentelemetry-api opentelemetry-sdk
-#
-# WHY:
-#   - CrewAI's version numbering skipped 0.12–0.85 on PyPI.
-#     The real versions are 0.11.x then 0.86.x then 1.x.
-#   - crewai>=0.86 is INDEPENDENT of LangChain (built from scratch).
-#     Do NOT install langchain and crewai together via normal pip —
-#     pip will try to satisfy crewai's chromadb>=1.0 requirement which
-#     clashes with your 0.5.23 pin. --no-deps bypasses this.
-#   - chromadb==0.5.23 is the last pure-Python backend.
-#     0.6+ uses Rust bindings that crash on Windows Python 3.10.
-#   - sentence-transformers 2.7.0 is the last version compatible with
-#     chromadb 0.5.23's tokenizers<=0.20 ceiling.
-#   - crewai-tools is NOT included — it pins exact crewai versions
-#     and pulls embedchain which requires chromadb<0.5.0.
-#     Our code uses crewai.tools.BaseTool directly (no crewai-tools needed).
-#   - fastapi 0.111.0 + starlette 0.37.2 are pinned together because
-#     fastapi 0.115 passes on_startup kwarg removed in starlette 0.41+.
+# Python 3.14 is NOT supported — chromadb has no working
+# wheels for 3.14 until 1.5.2+, which breaks other deps.
+# Python 3.12 has pre-built wheels for everything below.
 # ─────────────────────────────────────────────────────────────
 
-# ── Vector DB (pure-Python backend, Windows Python 3.10 safe) ─
+# ── Vector DB ─────────────────────────────────────────────────
+# 0.5.23: last pure-Python backend, no Rust crash on any OS
 chromadb==0.5.23
 
-# ── Embeddings (tokenizers ceiling matches chromadb 0.5.23) ───
+# ── Embeddings ────────────────────────────────────────────────
+# 2.7.0: last release with tokenizers<=0.20 (matches chromadb)
 sentence-transformers==2.7.0
-tokenizers==0.20.3
 
-# ── LangChain (for your ingest + retriever pipeline only) ─────
+# ── LangChain ─────────────────────────────────────────────────
 langchain==0.2.16
 langchain-community==0.2.16
 langchain-text-splitters==0.2.4
 
-# ── Document Loaders ──────────────────────────────────────────
+# ── Document Loaders ─────────────────────────────────────────
 pypdf==4.3.1
 python-docx==1.1.2
 unstructured==0.15.0
@@ -49,10 +34,14 @@ rank_bm25==0.2.2
 # ── Gemini API ────────────────────────────────────────────────
 google-generativeai==0.7.2
 
-# ── CrewAI: install AFTER this file with --no-deps (see above) ─
-# Run manually:
+# ── CrewAI ────────────────────────────────────────────────────
+# Install core only — crewai-tools conflicts via embedchain
+# After pip install -r requirements.txt, run:
 #   pip install crewai==0.86.0 --no-deps
-#   pip install litellm opentelemetry-api opentelemetry-sdk
+#   pip install litellm opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-http json_repair
+
+# ── MongoDB ───────────────────────────────────────────────────
+pymongo==4.8.0
 
 # ── Web Server ────────────────────────────────────────────────
 fastapi==0.111.0
@@ -63,6 +52,3 @@ uvicorn[standard]==0.30.6
 python-dotenv==1.0.1
 rich==13.7.1
 pydantic==2.8.2
-
-# crew ai
-crewai==0.86.0
