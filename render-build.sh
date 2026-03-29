@@ -1,11 +1,7 @@
 #!/usr/bin/env bash
 # render-build.sh
-# ─────────────────────────────────────────────────────────────
-# Render Build Command:
-#   chmod +x render-build.sh && ./render-build.sh
-# Render Environment Variable:
-#   PYTHON_VERSION = 3.10.14
-# ─────────────────────────────────────────────────────────────
+# Render Build Command: chmod +x render-build.sh && ./render-build.sh
+# Render Environment Variable: PYTHON_VERSION = 3.10.14
 
 set -e
 
@@ -41,7 +37,7 @@ pip install \
     "pdfplumber>=0.11.4" \
     "uv>=0.4.25"
 
-echo "==> Downgrading opentelemetry stack to 1.26.x (last protobuf-4.x compatible version) …"
+echo "==> Downgrading opentelemetry stack to 1.26.x …"
 pip install --force-reinstall --no-deps \
     "opentelemetry-proto==1.26.0" \
     "opentelemetry-exporter-otlp-proto-common==1.26.0" \
@@ -55,15 +51,28 @@ pip install --force-reinstall --no-deps \
     "opentelemetry-instrumentation-fastapi==0.47b0" \
     "opentelemetry-util-http==0.47b0"
 
-echo "==> Force-pinning protobuf + fixing stragglers …"
-# Must come AFTER all other installs so nothing pulls protobuf back up.
-# setuptools reinstalled last so pkg_resources is always present.
-# importlib-metadata pinned to <=8.0.0 as required by opentelemetry-api 1.26.0.
+echo "==> Force-pinning protobuf + stragglers …"
 pip install --force-reinstall \
     "protobuf==4.25.8" \
     "Deprecated==1.3.1" \
+    "wrapt==1.17.3" \
     "importlib-metadata==8.0.0" \
     "setuptools"
+
+echo "==> Patching crewai telemetry to remove pkg_resources dependency …"
+# crewai/telemetry/telemetry.py uses pkg_resources only for version lookups.
+# pkg_resources is unreliable in venv builds. We patch it out entirely.
+TELEMETRY_FILE=".venv/lib/python3.10/site-packages/crewai/telemetry/telemetry.py"
+if [ -f "$TELEMETRY_FILE" ]; then
+    # Replace 'import pkg_resources' with a safe fallback
+    sed -i 's/import pkg_resources/import importlib.metadata as _imeta/' "$TELEMETRY_FILE"
+    # Replace any pkg_resources.get_distribution calls with importlib.metadata equivalent
+    sed -i 's/pkg_resources\.get_distribution(\([^)]*\))\.version/_imeta.version(\1)/g' "$TELEMETRY_FILE"
+    echo "==> Patched crewai telemetry.py successfully"
+else
+    echo "==> WARNING: Could not find telemetry.py at $TELEMETRY_FILE"
+    find .venv -name "telemetry.py" -path "*/crewai/*" 2>/dev/null || true
+fi
 
 echo "==> Setting up frontend directory …"
 mkdir -p frontend
@@ -71,14 +80,11 @@ mkdir -p frontend
 [ -f app.js ]     && cp app.js     frontend/app.js
 
 echo "==> Running document ingestion …"
-# Builds the ChromaDB vector store from ./documents/ at deploy time.
-# Make sure your PDF/TXT/DOCX files are committed to the repo under documents/
 if [ -d "./documents" ] && [ "$(ls -A ./documents 2>/dev/null)" ]; then
     python ingest.py --docs_dir ./documents
     echo "==> Ingestion complete!"
 else
-    echo "==> WARNING: No documents found in ./documents — RAG will return no results."
-    echo "==> Commit your PDF/TXT/DOCX files to the documents/ folder and redeploy."
+    echo "==> WARNING: No documents found in ./documents"
 fi
 
 echo "==> Build complete!"
