@@ -39,7 +39,24 @@ pip install \
     opentelemetry-instrumentation-asgi==0.61b0 \
     opentelemetry-semantic-conventions==0.61b0 \
     opentelemetry-util-http==0.61b0 \
-    opentelemetry-exporter-otlp-proto-common==1.40.0
+    opentelemetry-exporter-otlp-proto-common==1.40.0 \
+    "auth0-python>=4.7.1" \
+    "instructor>=1.3.3" \
+    "jsonref>=1.1.0" \
+    "openpyxl>=3.1.5" \
+    "tomli-w>=1.1.0"
+
+echo "==> Force-pinning conflicting packages to correct versions …"
+# protobuf keeps getting pulled up to 6.x by transitive deps.
+# google-ai-generativelanguage==0.6.6 hard-requires protobuf<5.0.0
+# so we force it back down AFTER everything else is installed.
+# opentelemetry-exporter-otlp-proto-grpc 1.15.0 conflicts with
+# opentelemetry-proto 1.40.0 so we align them all to 1.40.0.
+pip install --force-reinstall \
+    "protobuf==4.25.8" \
+    "opentelemetry-proto==1.40.0" \
+    "opentelemetry-exporter-otlp-proto-grpc==1.40.0" \
+    "opentelemetry-exporter-otlp-proto-common==1.40.0"
 
 echo "==> Setting up frontend directory …"
 mkdir -p frontend
