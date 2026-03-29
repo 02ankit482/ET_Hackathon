@@ -35,11 +35,6 @@ pip install \
     durationpy==0.10 \
     kubernetes==35.0.0 \
     websocket-client==1.9.0 \
-    opentelemetry-instrumentation==0.61b0 \
-    opentelemetry-instrumentation-asgi==0.61b0 \
-    opentelemetry-semantic-conventions==0.61b0 \
-    opentelemetry-util-http==0.61b0 \
-    opentelemetry-exporter-otlp-proto-common==1.40.0 \
     "auth0-python>=4.7.1" \
     "instructor>=1.3.3" \
     "jsonref>=1.1.0" \
@@ -47,16 +42,30 @@ pip install \
     "tomli-w>=1.1.0"
 
 echo "==> Force-pinning conflicting packages to correct versions …"
-# protobuf keeps getting pulled up to 6.x by transitive deps.
-# google-ai-generativelanguage==0.6.6 hard-requires protobuf<5.0.0
-# so we force it back down AFTER everything else is installed.
-# opentelemetry-exporter-otlp-proto-grpc 1.15.0 conflicts with
-# opentelemetry-proto 1.40.0 so we align them all to 1.40.0.
-pip install --force-reinstall \
-    "protobuf==4.25.8" \
-    "opentelemetry-proto==1.40.0" \
-    "opentelemetry-exporter-otlp-proto-grpc==1.40.0" \
-    "opentelemetry-exporter-otlp-proto-common==1.40.0"
+# ROOT CONFLICT:
+#   google-ai-generativelanguage==0.6.6 -> requires protobuf<5.0
+#   opentelemetry-proto>=1.27.0         -> requires protobuf>=5.0
+#
+# Solution: downgrade the entire opentelemetry stack to 1.26.x
+# which is the last series that supports protobuf 4.x.
+# --no-deps prevents any of them from pulling protobuf back up.
+# Then we pin protobuf==4.25.8 last so it sticks.
+pip install --force-reinstall --no-deps \
+    "opentelemetry-proto==1.26.0" \
+    "opentelemetry-exporter-otlp-proto-common==1.26.0" \
+    "opentelemetry-exporter-otlp-proto-grpc==1.26.0" \
+    "opentelemetry-exporter-otlp-proto-http==1.26.0" \
+    "opentelemetry-api==1.26.0" \
+    "opentelemetry-sdk==1.26.0" \
+    "opentelemetry-semantic-conventions==0.47b0" \
+    "opentelemetry-instrumentation==0.47b0" \
+    "opentelemetry-instrumentation-asgi==0.47b0" \
+    "opentelemetry-instrumentation-fastapi==0.47b0" \
+    "opentelemetry-util-http==0.47b0"
+
+# Pin protobuf last — nothing above will re-pull it because
+# we used --no-deps on all otel packages above.
+pip install --force-reinstall "protobuf==4.25.8"
 
 echo "==> Setting up frontend directory …"
 mkdir -p frontend
