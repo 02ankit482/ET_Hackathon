@@ -3,7 +3,6 @@
 # ─────────────────────────────────────────────────────────────
 # Render Build Command:
 #   chmod +x render-build.sh && ./render-build.sh
-#
 # Render Environment Variable:
 #   PYTHON_VERSION = 3.10.14
 # ─────────────────────────────────────────────────────────────
@@ -19,10 +18,9 @@ pip install -r requirements.txt
 echo "==> Installing crewai==0.86.0 (--no-deps to avoid chromadb>=1.0 conflict) …"
 pip install "crewai==0.86.0" --no-deps
 
-echo "==> Installing crewai's missing runtime deps explicitly …"
+echo "==> Installing crewai's missing runtime deps …"
 pip install \
     appdirs==1.4.4 \
-    setuptools \
     backoff==2.2.1 \
     click==8.3.1 \
     shellingham==1.5.4 \
@@ -39,17 +37,11 @@ pip install \
     "instructor>=1.3.3" \
     "jsonref>=1.1.0" \
     "openpyxl>=3.1.5" \
-    "tomli-w>=1.1.0"
+    "tomli-w>=1.1.0" \
+    "pdfplumber>=0.11.4" \
+    "uv>=0.4.25"
 
-echo "==> Force-pinning conflicting packages to correct versions …"
-# ROOT CONFLICT:
-#   google-ai-generativelanguage==0.6.6 -> requires protobuf<5.0
-#   opentelemetry-proto>=1.27.0         -> requires protobuf>=5.0
-#
-# Solution: downgrade the entire opentelemetry stack to 1.26.x
-# which is the last series that supports protobuf 4.x.
-# --no-deps prevents any of them from pulling protobuf back up.
-# Then we pin protobuf==4.25.8 last so it sticks.
+echo "==> Downgrading opentelemetry stack to 1.26.x (last protobuf-4.x compatible version) …"
 pip install --force-reinstall --no-deps \
     "opentelemetry-proto==1.26.0" \
     "opentelemetry-exporter-otlp-proto-common==1.26.0" \
@@ -63,14 +55,30 @@ pip install --force-reinstall --no-deps \
     "opentelemetry-instrumentation-fastapi==0.47b0" \
     "opentelemetry-util-http==0.47b0"
 
-# Pin protobuf last — nothing above will re-pull it because
-# we used --no-deps on all otel packages above.
-pip install --force-reinstall "protobuf==4.25.8"
-pip install "Deprecated==1.3.1"
+echo "==> Force-pinning protobuf + fixing stragglers …"
+# Must come AFTER all other installs so nothing pulls protobuf back up.
+# setuptools reinstalled last so pkg_resources is always present.
+# importlib-metadata pinned to <=8.0.0 as required by opentelemetry-api 1.26.0.
+pip install --force-reinstall \
+    "protobuf==4.25.8" \
+    "Deprecated==1.3.1" \
+    "importlib-metadata==8.0.0" \
+    "setuptools"
 
 echo "==> Setting up frontend directory …"
 mkdir -p frontend
 [ -f index.html ] && cp index.html frontend/index.html
 [ -f app.js ]     && cp app.js     frontend/app.js
+
+echo "==> Running document ingestion …"
+# Builds the ChromaDB vector store from ./documents/ at deploy time.
+# Make sure your PDF/TXT/DOCX files are committed to the repo under documents/
+if [ -d "./documents" ] && [ "$(ls -A ./documents 2>/dev/null)" ]; then
+    python ingest.py --docs_dir ./documents
+    echo "==> Ingestion complete!"
+else
+    echo "==> WARNING: No documents found in ./documents — RAG will return no results."
+    echo "==> Commit your PDF/TXT/DOCX files to the documents/ folder and redeploy."
+fi
 
 echo "==> Build complete!"
