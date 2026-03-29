@@ -7,6 +7,7 @@
 from __future__ import annotations
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -15,9 +16,52 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from crews.planning_crew import create_planning_crew
 from crews.chat_crew import create_chat_crew
+from config import (
+    CHAT_MAX_TOKENS_DEFAULT,
+    CHAT_RETRY_TOKEN_BUFFER,
+    PLANNING_MAX_TOKENS_DEFAULT,
+    PLANNING_RETRY_TOKEN_BUFFER,
+    PLANNING_RETRY_MAX_TOKENS_ON_TRUNCATION,
+)
 from models import FinancialPlan, ChatResponse
 
 logger = logging.getLogger(__name__)
+
+_AFFORDABLE_TOKENS_PATTERNS = (
+    re.compile(r"can only afford\s+(\d+)", re.IGNORECASE),
+    re.compile(r"afford\s+up to\s+(\d+)", re.IGNORECASE),
+)
+
+
+def _extract_affordable_max_tokens(error_text: str) -> int | None:
+    """Extract provider-reported affordable token cap from OpenRouter credit errors."""
+    for pattern in _AFFORDABLE_TOKENS_PATTERNS:
+        match = pattern.search(error_text)
+        if match:
+            try:
+                return int(match.group(1))
+            except ValueError:
+                return None
+    return None
+
+
+def _is_length_limit_error(error_text: str) -> bool:
+    """Check if error indicates token/length limit was exceeded.
+    
+    Handles:
+    - "length limit was reached" - OpenRouter/OpenAI structured output truncation
+    - "Could not parse response content as the length limit was reached" - exact error from logs
+    - "context length exceeded" - OpenAI context window error
+    - "maximum context length" - alternate phrasing
+    """
+    lowered = error_text.lower()
+    return (
+        "length limit was reached" in lowered
+        or "could not parse response content" in lowered
+        or "context length exceeded" in lowered
+        or "maximum context length" in lowered
+        or "completion_tokens" in lowered and "finish_reason" in lowered
+    )
 
 
 async def generate_plan(
@@ -38,11 +82,66 @@ async def generate_plan(
     Returns:
         FinancialPlan Pydantic model
     """
-    crew = create_planning_crew(profile_data, cas_data)
+    requested_max_tokens = PLANNING_MAX_TOKENS_DEFAULT
+    current_max_tokens = requested_max_tokens
+    compact_output = False
+    result = None
+
     # Use kickoff_async() since we're already in an async context (FastAPI/uvicorn)
     # This avoids "asyncio.run() cannot be called from a running event loop" error
     # that occurs when guardrails try to validate using async operations
-    result = await crew.kickoff_async()
+    for attempt in range(3):
+        try:
+            crew = create_planning_crew(
+                profile_data,
+                cas_data,
+                max_tokens=current_max_tokens,
+                compact_output=compact_output,
+            )
+            result = await crew.kickoff_async()
+            break
+        except Exception as exc:
+            if attempt == 2:
+                raise
+
+            error_text = str(exc)
+            affordable_tokens = _extract_affordable_max_tokens(error_text)
+            next_max_tokens = current_max_tokens
+            next_compact_output = compact_output
+
+            if affordable_tokens is not None:
+                next_max_tokens = max(512, affordable_tokens - PLANNING_RETRY_TOKEN_BUFFER)
+                next_compact_output = True
+            elif _is_length_limit_error(error_text):
+                if not compact_output:
+                    next_compact_output = True
+                    next_max_tokens = min(current_max_tokens, PLANNING_RETRY_MAX_TOKENS_ON_TRUNCATION)
+                else:
+                    next_max_tokens = max(1024, current_max_tokens - 1024)
+            else:
+                raise
+
+            if (
+                next_max_tokens >= current_max_tokens
+                and next_compact_output == compact_output
+            ):
+                raise
+
+            logger.warning(
+                "Planning crew failed on attempt %s (max_tokens=%s, compact_output=%s). "
+                "Retrying with max_tokens=%s, compact_output=%s. Error excerpt: %s",
+                attempt + 1,
+                current_max_tokens,
+                compact_output,
+                next_max_tokens,
+                next_compact_output,
+                error_text[:240],
+            )
+            current_max_tokens = next_max_tokens
+            compact_output = next_compact_output
+
+    if result is None:
+        raise ValueError("Planning crew did not return a result")
 
     # Extract the Pydantic output - handle both pydantic attribute and raw JSON parsing
     plan: FinancialPlan | None = None
@@ -123,9 +222,42 @@ async def handle_chat(
     Returns:
         ChatResponse with reply, needs_replan flag, and profile_updates
     """
-    crew = create_chat_crew(user_id, message, profile_data, chat_history)
+    requested_max_tokens = CHAT_MAX_TOKENS_DEFAULT
+    crew = create_chat_crew(
+        user_id,
+        message,
+        profile_data,
+        chat_history,
+        max_tokens=requested_max_tokens,
+    )
     # Use kickoff_async() since we're already in an async context (FastAPI/uvicorn)
-    result = await crew.kickoff_async()
+    try:
+        result = await crew.kickoff_async()
+    except Exception as exc:
+        error_text = str(exc)
+        affordable_tokens = _extract_affordable_max_tokens(error_text)
+        if affordable_tokens is None:
+            raise
+
+        retry_max_tokens = max(256, affordable_tokens - CHAT_RETRY_TOKEN_BUFFER)
+        if retry_max_tokens >= requested_max_tokens:
+            raise
+
+        logger.warning(
+            "Chat hit OpenRouter credit/token limit (requested=%s, affordable=%s). "
+            "Retrying once with max_tokens=%s.",
+            requested_max_tokens,
+            affordable_tokens,
+            retry_max_tokens,
+        )
+        retry_crew = create_chat_crew(
+            user_id,
+            message,
+            profile_data,
+            chat_history,
+            max_tokens=retry_max_tokens,
+        )
+        result = await retry_crew.kickoff_async()
 
     # Extract the Pydantic output - handle both pydantic attribute and raw JSON parsing
     chat_response: ChatResponse | None = None

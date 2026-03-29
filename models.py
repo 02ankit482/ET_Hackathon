@@ -5,8 +5,29 @@
 # ─────────────────────────────────────────────────────────────
 
 from __future__ import annotations
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 from pydantic import BaseModel, Field
+
+
+# ── Fund Recommendation ───────────────────────────────────────
+
+class FundRecommendation(BaseModel):
+    """A mutual fund recommendation with key metrics."""
+    name: str = Field(description="Fund name (Direct Growth plan)")
+    isin: str = Field(description="ISIN code for identification")
+    category: str = Field(description="SEBI category: large_cap, mid_cap, small_cap, debt, gold")
+    amc: str = Field(description="Asset Management Company name")
+    risk_level: str = Field(description="low, moderate, high, very_high")
+    expense_ratio_pct: float = Field(description="Expense ratio as percentage")
+    returns_1y_pct: float = Field(description="1-year trailing return %")
+    returns_3y_pct: float = Field(description="3-year CAGR %")
+    returns_5y_pct: float = Field(description="5-year CAGR %")
+    expected_return_pct: float = Field(description="Expected return for forecasting")
+    min_sip_amount: int = Field(default=500, description="Minimum SIP amount in ₹")
+    rating: int = Field(default=0, description="Star rating 1-5 (0 if not rated)")
+    
+    class Config:
+        extra = "forbid"
 
 
 # ── Monthly Plan Entry ────────────────────────────────────────
@@ -25,6 +46,38 @@ class MonthlyPlanEntry(BaseModel):
     equity_pct: float = Field(description="Target equity allocation % for this month (glidepath)")
     debt_pct: float = Field(description="Target debt allocation % for this month")
     notes: str = Field(default="", description="Any special notes for this month")
+    
+    # Fund recommendations moved to plan level to reduce token usage
+    # (same funds apply across all months in a 6-month plan)
+    
+    class Config:
+        extra = "forbid"
+
+
+# ── Fund Options Container ────────────────────────────────────
+
+class FundOptions(BaseModel):
+    """Container for fund recommendations by category (shared across all months)."""
+    large_cap_funds: List[FundRecommendation] = Field(
+        default_factory=list,
+        description="Top 3-5 large-cap fund options (educational)"
+    )
+    mid_cap_funds: List[FundRecommendation] = Field(
+        default_factory=list,
+        description="Top 3-5 mid-cap fund options (educational)"
+    )
+    small_cap_funds: List[FundRecommendation] = Field(
+        default_factory=list,
+        description="Top 3-5 small-cap fund options (educational)"
+    )
+    debt_funds: List[FundRecommendation] = Field(
+        default_factory=list,
+        description="Top 3-5 debt fund options (educational)"
+    )
+    gold_funds: List[FundRecommendation] = Field(
+        default_factory=list,
+        description="Top 3-5 gold fund options (educational)"
+    )
     
     class Config:
         extra = "forbid"
@@ -121,7 +174,23 @@ class FinancialPlan(BaseModel):
 
     monthly_plan: list[MonthlyPlanEntry] = Field(
         default_factory=list,
-        description="Month-by-month allocation plan (first 24 months minimum)"
+        description="Month-by-month allocation plan for next 6 months"
+    )
+    
+    # Fund recommendations at plan level (shared across all months to reduce tokens)
+    fund_options: Optional[FundOptions] = Field(
+        default=None,
+        description="Educational fund options by category (applies to all months)"
+    )
+    
+    # Plan metadata for date tracking
+    plan_start_month: str = Field(
+        default="",
+        description="First month of the plan in YYYY-MM format (should be current month + 1)"
+    )
+    plan_generated_at: str = Field(
+        default="",
+        description="ISO timestamp when plan was generated"
     )
 
     tax_comparison: TaxComparison = Field(description="Old vs New regime analysis")

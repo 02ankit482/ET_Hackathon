@@ -20,6 +20,7 @@ load_dotenv(dotenv_path=BASE_DIR / ".env")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")  # CrewAI expects GEMINI_API_KEY
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+OPENAI_API_BASE = os.getenv("OPENAI_API_BASE", "https://openrouter.ai/api/v1")
 GEMINI_MODEL   = "gemini-2.5-flash"  
 GEMINI_MAX_OUTPUT_TOKENS = int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "5000"))
 
@@ -36,6 +37,15 @@ MONGODB_DATABASE = os.getenv("MONGODB_DATABASE", "everything_money")
 # DeepSeek has better rate limits than Gemini and handles Dict fields properly
 PLANNING_LLM = "openrouter/deepseek/deepseek-chat"  # For all 6 planning agents
 CHAT_LLM = "openrouter/deepseek/deepseek-chat"      # For chat agent
+CHAT_MAX_TOKENS_DEFAULT = int(os.getenv("CHAT_MAX_TOKENS_DEFAULT", "16000"))
+CHAT_RETRY_TOKEN_BUFFER = int(os.getenv("CHAT_RETRY_TOKEN_BUFFER", "256"))
+# Increased from 8192 - FinancialPlan schema with 6 months × 5 categories × funds
+# requires more tokens for complete JSON structured output
+PLANNING_MAX_TOKENS_DEFAULT = int(os.getenv("PLANNING_MAX_TOKENS_DEFAULT", "16384"))
+PLANNING_RETRY_TOKEN_BUFFER = int(os.getenv("PLANNING_RETRY_TOKEN_BUFFER", "256"))
+PLANNING_RETRY_MAX_TOKENS_ON_TRUNCATION = int(
+    os.getenv("PLANNING_RETRY_MAX_TOKENS_ON_TRUNCATION", "12288")
+)
 
 # ── Vector Store ──────────────────────────────────────────────
 CHROMA_DB_PATH      = str(BASE_DIR / "chroma_db")

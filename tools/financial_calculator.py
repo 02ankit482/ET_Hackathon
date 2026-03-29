@@ -586,3 +586,144 @@ Available calculations and their required params (with example values):
             "liability_breakdown": liabilities,
             "net_worth": round(net, 2),
         }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MUTUAL FUND RECOMMENDER TOOL
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class MutualFundRecommenderInput(BaseModel):
+    """Input for mutual fund recommendations."""
+    category: str = Field(
+        description="Fund category: large_cap, mid_cap, small_cap, debt, gold"
+    )
+    top_n: int = Field(
+        default=5,
+        description="Number of fund recommendations to return (default 5)"
+    )
+
+
+class MutualFundRecommenderTool(BaseTool):
+    name: str = "recommend_mutual_funds"
+    description: str = """Returns top mutual fund recommendations for a given category.
+    
+Available categories:
+- large_cap: Nifty 50 / large-cap equity funds (moderate risk)
+- mid_cap: Nifty Midcap 150 / mid-cap funds (high risk)
+- small_cap: Nifty Smallcap 250 / small-cap funds (very high risk)
+- debt: Debt/bond funds (low risk)
+- gold: Gold funds (moderate risk)
+
+Returns top 5 funds with: name, ISIN, AMC, risk level, expense ratio, 
+1Y/3Y/5Y returns, expected returns for planning.
+
+NOTE: These are EDUCATIONAL recommendations. Users should verify current 
+performance from official AMC websites before investing."""
+    args_schema: Type[BaseModel] = MutualFundRecommenderInput
+
+    def _run(self, category: str, top_n: int = 5) -> str:
+        try:
+            from tools.mutual_fund_data import (
+                get_funds_by_category,
+                get_expected_return,
+                get_data_freshness,
+            )
+            
+            funds = get_funds_by_category(category, top_n)
+            if not funds:
+                return json.dumps({
+                    "error": f"Unknown category: {category}",
+                    "available_categories": ["large_cap", "mid_cap", "small_cap", "debt", "gold"]
+                })
+            
+            expected_return = get_expected_return(category, "expected")
+            freshness = get_data_freshness()
+            
+            fund_list = []
+            for f in funds:
+                fund_list.append({
+                    "name": f.name,
+                    "isin": f.isin,
+                    "category": f.category,
+                    "sub_category": f.sub_category,
+                    "amc": f.amc,
+                    "risk_level": f.risk_level,
+                    "expense_ratio_pct": f.expense_ratio_pct,
+                    "aum_cr": f.aum_cr,
+                    "returns_1y_pct": f.returns_1y_pct,
+                    "returns_3y_pct": f.returns_3y_pct,
+                    "returns_5y_pct": f.returns_5y_pct,
+                    "expected_return_pct": expected_return,
+                    "min_sip_amount": f.min_sip_amount,
+                    "rating": f.rating,
+                })
+            
+            return json.dumps({
+                "category": category,
+                "fund_count": len(fund_list),
+                "expected_return_pct": expected_return,
+                "funds": fund_list,
+                "data_freshness": freshness,
+            }, indent=2)
+            
+        except Exception as e:
+            return json.dumps({"error": str(e)})
+
+
+class AllFundRecommendationsInput(BaseModel):
+    """Input for getting all fund recommendations at once."""
+    pass
+
+
+class AllFundRecommendationsTool(BaseTool):
+    name: str = "get_all_fund_recommendations"
+    description: str = """Returns top 5 mutual fund recommendations for ALL categories at once.
+    
+Returns funds for: large_cap, mid_cap, small_cap, debt, gold
+
+Use this tool to get fund options for the month-by-month plan.
+Each category includes: name, ISIN, AMC, risk level, expense ratio, returns, etc."""
+    args_schema: Type[BaseModel] = AllFundRecommendationsInput
+
+    def _run(self) -> str:
+        try:
+            from tools.mutual_fund_data import (
+                get_funds_by_category,
+                get_expected_return,
+                get_data_freshness,
+                get_all_categories,
+            )
+            
+            result = {}
+            for category in get_all_categories():
+                funds = get_funds_by_category(category, 5)
+                expected_return = get_expected_return(category, "expected")
+                
+                fund_list = []
+                for f in funds:
+                    fund_list.append({
+                        "name": f.name,
+                        "isin": f.isin,
+                        "category": f.category,
+                        "amc": f.amc,
+                        "risk_level": f.risk_level,
+                        "expense_ratio_pct": f.expense_ratio_pct,
+                        "returns_1y_pct": f.returns_1y_pct,
+                        "returns_3y_pct": f.returns_3y_pct,
+                        "returns_5y_pct": f.returns_5y_pct,
+                        "expected_return_pct": expected_return,
+                        "min_sip_amount": f.min_sip_amount,
+                        "rating": f.rating,
+                    })
+                
+                result[category] = {
+                    "expected_return_pct": expected_return,
+                    "funds": fund_list,
+                }
+            
+            result["data_freshness"] = get_data_freshness()
+            
+            return json.dumps(result, indent=2)
+            
+        except Exception as e:
+            return json.dumps({"error": str(e)})

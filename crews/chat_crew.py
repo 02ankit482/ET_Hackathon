@@ -7,12 +7,17 @@
 
 from __future__ import annotations
 import json
-from crewai import Agent, Task, Crew, Process
+from crewai import Agent, Task, Crew, Process, LLM
 
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import CHAT_LLM, SEBI_DISCLAIMER, FINANCIAL_CONSTANTS
+from config import (
+    CHAT_LLM,
+    OPENROUTER_API_KEY,
+    OPENAI_API_BASE,
+    CHAT_MAX_TOKENS_DEFAULT,
+)
 from models import ChatResponse
 from tools.financial_calculator import FinancialCalculatorTool
 from tools.rag_tool import FinanceRAGTool
@@ -31,6 +36,7 @@ def create_chat_crew(
     message: str,
     profile_data: dict,
     chat_history: list[dict] | None = None,
+    max_tokens: int | None = None,
 ) -> Crew:
     """
     Create a lightweight Chat Crew for handling user messages.
@@ -52,6 +58,14 @@ def create_chat_crew(
             history_str += f"{role.upper()}: {content}\n"
 
     profile_str = json.dumps(profile_data, indent=2)
+    llm_max_tokens = max_tokens if max_tokens is not None else CHAT_MAX_TOKENS_DEFAULT
+    chat_llm = LLM(
+        model=CHAT_LLM,
+        base_url=OPENAI_API_BASE,
+        api_key=OPENROUTER_API_KEY,
+        temperature=0.7,
+        max_tokens=llm_max_tokens,
+    )
 
     advisor_agent = Agent(
         role="Friendly Financial Educator & Advisor",
@@ -74,7 +88,7 @@ def create_chat_crew(
             "licensed financial advice from a SEBI-registered Investment Adviser."
         ),
         tools=[calc_tool, rag_tool, profile_read, profile_update],
-        llm=CHAT_LLM,
+        llm=chat_llm,
         verbose=True,
     )
 
@@ -92,24 +106,29 @@ CURRENT MESSAGE: {message}
 
 INSTRUCTIONS:
 1. If the message implies a PROFILE CHANGE (retirement age, income, expenses, goals, etc.):
-   - Use the update_user_profile tool with user_id="{user_id}" and the new values
-   - Set needs_replan=true in your response
-   - Tell the user their plan will be updated
-   
-2. If the message is a FINANCIAL QUESTION:
-   - Use finance_knowledge_search to find relevant information
-   - Use financial_calculator for any numerical computations
-   - Explain clearly, tailored to the user's experience level
-   
-3. For ALL substantive financial responses:
-   - Add a brief disclaimer: "Note: This is AI-generated educational guidance, 
-     not advice from a SEBI-registered Investment Adviser."
+    - Use the update_user_profile tool with user_id="{user_id}" and the new values
+    - Set needs_replan=true in your response
+    - Tell the user their plan will be updated
+    
+2. If the user explicitly asks to regenerate/replan/refresh/recreate their financial plan
+   (even without profile changes), set needs_replan=true.
+   - Examples: "regenerate my financial plan", "please replan", "refresh my plan"
+   - In this case, keep profile_updates={{}} unless you also detected profile changes.
 
-4. NEVER recommend specific fund names, ISINs, or stock tickers.
+3. If the message is a FINANCIAL QUESTION:
+    - Use finance_knowledge_search to find relevant information
+    - Use financial_calculator for any numerical computations
+    - Explain clearly, tailored to the user's experience level
+    
+4. For ALL substantive financial responses:
+    - Add a brief disclaimer: "Note: This is AI-generated educational guidance, 
+      not advice from a SEBI-registered Investment Adviser."
+
+5. NEVER recommend specific fund names, ISINs, or stock tickers.
 
 Your response must follow the ChatResponse schema:
 - reply: Your response text
-- needs_replan: true if profile changed, false otherwise
+- needs_replan: true if profile changed OR if user explicitly requests plan regeneration; false otherwise
 - profile_updates: dict of fields that changed (empty if no changes)""",
         expected_output=(
             "A ChatResponse with the advisor's reply, needs_replan flag, "
