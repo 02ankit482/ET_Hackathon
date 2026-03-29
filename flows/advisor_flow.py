@@ -33,6 +33,34 @@ _AFFORDABLE_TOKENS_PATTERNS = (
 )
 
 
+def _extract_json_object(raw_text: str) -> str:
+    """Extract a JSON object string from raw LLM output.
+
+    Handles common wrappers:
+    - Markdown code fences: ```json ... ```
+    - Surrounding prose before/after JSON
+    """
+    text = raw_text.strip()
+
+    # Strip markdown code fences first if present.
+    if text.startswith("```"):
+        fenced = re.search(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL | re.IGNORECASE)
+        if fenced:
+            text = fenced.group(1).strip()
+
+    # Fast path for valid JSON object text.
+    if text.startswith("{") and text.endswith("}"):
+        return text
+
+    # Fallback: pick the largest object-looking substring.
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return text[start:end + 1]
+
+    return text
+
+
 def _extract_affordable_max_tokens(error_text: str) -> int | None:
     """Extract provider-reported affordable token cap from OpenRouter credit errors."""
     for pattern in _AFFORDABLE_TOKENS_PATTERNS:
@@ -160,14 +188,19 @@ async def generate_plan(
     else:
         # Fallback: parse from raw output (JSON string)
         raw_output = result.raw if hasattr(result, 'raw') else str(result)
-        logger.info(f"result.pydantic is None, parsing from raw output (len={len(raw_output)})")
+        normalized_output = _extract_json_object(raw_output)
+        logger.info(
+            "result.pydantic is None, parsing from raw output (len=%s, normalized_len=%s)",
+            len(raw_output),
+            len(normalized_output),
+        )
         try:
             # Parse JSON and validate with Pydantic
-            plan_data = json.loads(raw_output)
+            plan_data = json.loads(normalized_output)
             plan = FinancialPlan.model_validate(plan_data)
             logger.info("Plan successfully parsed from raw JSON output")
         except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse plan JSON: {e}")
+            logger.error("Failed to parse plan JSON after normalization: %s", e)
             raise ValueError(f"Invalid plan JSON from crew: {e}")
         except Exception as e:
             logger.error(f"Failed to validate plan data: {e}")
@@ -232,7 +265,7 @@ async def handle_chat(
         ChatResponse with reply, needs_replan flag, and profile_updates
     """
     requested_max_tokens = CHAT_MAX_TOKENS_DEFAULT
-    crew = create_chat_crew(
+    crew_or_response = create_chat_crew(
         user_id,
         message,
         profile_data,
@@ -240,38 +273,50 @@ async def handle_chat(
         max_tokens=requested_max_tokens,
         event_callback=event_callback,
     )
-    # Use kickoff_async() since we're already in an async context (FastAPI/uvicorn)
-    try:
-        result = await crew.kickoff_async()
-    except Exception as exc:
-        error_text = str(exc)
-        affordable_tokens = _extract_affordable_max_tokens(error_text)
-        if affordable_tokens is None:
-            raise
 
-        retry_max_tokens = max(256, affordable_tokens - CHAT_RETRY_TOKEN_BUFFER)
-        if retry_max_tokens >= requested_max_tokens:
-            raise
+    # Fast path: routing may return a direct ChatResponse (e.g., explicit replan requests)
+    if isinstance(crew_or_response, ChatResponse):
+        chat_response = crew_or_response
+        result = None
+    else:
+        crew = crew_or_response
+        # Use kickoff_async() since we're already in an async context (FastAPI/uvicorn)
+        try:
+            result = await crew.kickoff_async()
+        except Exception as exc:
+            error_text = str(exc)
+            affordable_tokens = _extract_affordable_max_tokens(error_text)
+            if affordable_tokens is None:
+                raise
 
-        logger.warning(
-            "Chat hit OpenRouter credit/token limit (requested=%s, affordable=%s). "
-            "Retrying once with max_tokens=%s.",
-            requested_max_tokens,
-            affordable_tokens,
-            retry_max_tokens,
-        )
-        retry_crew = create_chat_crew(
-            user_id,
-            message,
-            profile_data,
-            chat_history,
-            max_tokens=retry_max_tokens,
-            event_callback=event_callback,
-        )
-        result = await retry_crew.kickoff_async()
+            retry_max_tokens = max(256, affordable_tokens - CHAT_RETRY_TOKEN_BUFFER)
+            if retry_max_tokens >= requested_max_tokens:
+                raise
+
+            logger.warning(
+                "Chat hit OpenRouter credit/token limit (requested=%s, affordable=%s). "
+                "Retrying once with max_tokens=%s.",
+                requested_max_tokens,
+                affordable_tokens,
+                retry_max_tokens,
+            )
+            retry_crew_or_response = create_chat_crew(
+                user_id,
+                message,
+                profile_data,
+                chat_history,
+                max_tokens=retry_max_tokens,
+                event_callback=event_callback,
+            )
+            if isinstance(retry_crew_or_response, ChatResponse):
+                chat_response = retry_crew_or_response
+                result = None
+            else:
+                result = await retry_crew_or_response.kickoff_async()
 
     # Extract the Pydantic output - handle both pydantic attribute and raw JSON parsing
-    chat_response: ChatResponse | None = None
+    if 'chat_response' not in locals():
+        chat_response = None
     
     # Try pydantic attribute first (preferred)
     if hasattr(result, 'pydantic') and result.pydantic is not None:
@@ -280,9 +325,10 @@ async def handle_chat(
     else:
         # Fallback: parse from raw output (JSON string)
         raw_output = result.raw if hasattr(result, 'raw') else str(result)
+        normalized_output = _extract_json_object(raw_output)
         logger.info(f"result.pydantic is None, parsing ChatResponse from raw output")
         try:
-            response_data = json.loads(raw_output)
+            response_data = json.loads(normalized_output)
             chat_response = ChatResponse.model_validate(response_data)
             logger.info("ChatResponse successfully parsed from raw JSON output")
         except json.JSONDecodeError as e:
