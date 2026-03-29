@@ -1,7 +1,12 @@
 # crews/planning_crew.py
 # ─────────────────────────────────────────────────────────────
-# Planning Crew: 6 sequential agents for financial plan generation.
-# Uses GPT-4o-mini for all agents (accuracy > latency).
+# Planning Crew: 5 sequential agents for financial plan generation.
+# Uses DeepSeek for all agents (accuracy > latency).
+#
+# TOKEN OPTIMIZATION:
+# - Deterministic metrics pre-computed in Python (not LLM tools)
+# - Fund data cached at startup
+# - Compressed context between agents
 # ─────────────────────────────────────────────────────────────
 
 from __future__ import annotations
@@ -22,16 +27,21 @@ from config import (
 )
 from models import FinancialPlan
 
-# Import individual tools (simpler for LLMs to use)
+# Pre-computation module (eliminates need for many tool calls)
+from crews.precompute import (
+    compute_metrics,
+    compute_tax_comparison,
+    get_cached_fund_recommendations,
+    format_metrics_for_prompt,
+    format_tax_for_prompt,
+    PrecomputedMetrics,
+)
+
+# Import tools (reduced set - most calculations now pre-computed)
 from tools.financial_calculator import (
-    MonthlySurplusTool,
-    DebtToIncomeTool,
-    EmergencyFundTool,
-    NetWorthTool,
     AssetAllocationTool,
     RetirementCorpusTool,
     SIPRequiredTool,
-    InsuranceGapTool,
     MutualFundRecommenderTool,
     AllFundRecommendationsTool,
 )
@@ -41,15 +51,10 @@ from tools.portfolio_overlap import PortfolioOverlapTool
 
 
 # ── Shared Tool Instances ─────────────────────────────────────
-# Individual calculation tools (preferred - simpler for LLMs)
-surplus_tool = MonthlySurplusTool()
-dti_tool = DebtToIncomeTool()
-emergency_tool = EmergencyFundTool()
-networth_tool = NetWorthTool()
+# Only tools that need LLM reasoning (not deterministic calculations)
 allocation_tool = AssetAllocationTool()
 corpus_tool = RetirementCorpusTool()
 sip_tool = SIPRequiredTool()
-insurance_tool = InsuranceGapTool()
 
 # Mutual fund recommender tools
 mf_recommender_tool = MutualFundRecommenderTool()
@@ -236,43 +241,49 @@ def validate_financial_plan(result):
 # ── Agent Definitions ─────────────────────────────────────────
 
 def _agent_1_data_analyst(planning_llm: LLM) -> Agent:
+    """
+    Data Analyst agent - now uses pre-computed metrics.
+    Only needs RAG tool for validation insights, not calculation tools.
+    """
     return Agent(
         role="Certified Financial Data Analyst",
         goal=(
-            "Validate and analyze user financial data to compute base metrics: "
-            "monthly surplus, debt-to-income ratio, savings rate, net worth, "
-            "emergency fund adequacy. Flag any data inconsistencies."
+            "Validate the pre-computed financial metrics and provide insights. "
+            "Review the monthly surplus, debt-to-income ratio, savings rate, net worth, "
+            "and emergency fund adequacy. Flag any concerns based on the profile."
         ),
         backstory=(
-            "You are a meticulous financial data analyst who validates every number "
-            "before it enters the planning pipeline. You catch errors like expenses "
-            "exceeding income, unrealistic return expectations, or missing critical "
-            "data points. You always use the calculation tools for all computations. "
-            "Each tool takes simple numeric inputs - just pass the values directly."
+            "You are a meticulous financial data analyst. The calculations have already "
+            "been done for you — your job is to validate them against the user's profile "
+            "and provide insights. Check for inconsistencies like expenses > income. "
+            "Use the RAG tool only if you need additional financial planning context."
         ),
-        tools=[surplus_tool, dti_tool, emergency_tool, networth_tool, allocation_tool, rag_tool],
+        tools=[rag_tool],  # Reduced from 6 tools - calculations pre-computed
         llm=planning_llm,
         verbose=True,
     )
 
 
 def _agent_2_tax_insurance_specialist(planning_llm: LLM) -> Agent:
+    """
+    Tax & Insurance agent - now uses pre-computed tax comparison.
+    Focuses on recommendations, not calculations.
+    """
     return Agent(
         role="Indian Tax and Insurance Specialist (FY 2025-26)",
         goal=(
-            "Deliver a combined tax and insurance assessment. Compare tax liability "
-            "under BOTH old and new regimes for FY 2025-26, identify optimal regime, "
-            "map deductions, and assess insurance coverage gaps (term + health) with "
-            "recommended coverage amounts."
+            "Review the pre-computed tax comparison and insurance gap analysis. "
+            "Provide recommendations on tax regime choice and insurance coverage. "
+            "Identify tax-saving investment opportunities within limits."
         ),
         backstory=(
             "You are a dual-domain specialist in Indian taxation and insurance. "
-            "You compute tax outcomes using the tax_calculator tool and insurance "
-            "coverage gaps using the calculate_insurance_gap tool. You never estimate "
-            "numerical results manually. You do not recommend specific products; only "
-            "coverage amounts and category-level actions."
+            "The tax calculations (both regimes) and insurance gaps have been pre-computed. "
+            "Your job is to interpret the results and provide actionable recommendations. "
+            "You never estimate numbers - use the pre-computed values. You recommend "
+            "coverage amounts and category-level actions, NOT specific products."
         ),
-        tools=[tax_tool, insurance_tool, rag_tool],
+        tools=[rag_tool],  # Reduced from 3 tools - calculations pre-computed
         llm=planning_llm,
         verbose=True,
     )
@@ -373,6 +384,11 @@ def build_planning_tasks(
     """
     Build the 5-agent planning pipeline with tasks.
 
+    TOKEN OPTIMIZATION:
+    - Pre-compute deterministic metrics in Python (not via LLM tools)
+    - Cache fund recommendations
+    - Pass compressed summaries between agents
+
     Args:
         profile_data: User's financial profile dict
         cas_data: Parsed CAS mutual fund data (optional)
@@ -380,35 +396,29 @@ def build_planning_tasks(
     Returns:
         (agents_list, tasks_list) ready to be passed to Crew
     """
+    # ══════════════════════════════════════════════════════════════
+    # PRE-COMPUTATION: Run all deterministic calculations in Python
+    # This eliminates 5-6 tool calls per request, saving ~20-30% tokens
+    # ══════════════════════════════════════════════════════════════
+    precomputed_metrics = compute_metrics(profile_data)
+    precomputed_tax = compute_tax_comparison(profile_data)
+    cached_funds = get_cached_fund_recommendations(top_n=5 if not compact_output else 3)
+    
+    # Format for prompt injection (much smaller than full profile)
+    metrics_prompt = format_metrics_for_prompt(precomputed_metrics)
+    tax_prompt = format_tax_for_prompt(precomputed_tax)
+    
+    # Compact profile (only fields needed for context, not calculations)
     compact_profile = {
         "name": profile_data.get("name"),
         "age": profile_data.get("age"),
         "city": profile_data.get("city"),
-        "annual_income": profile_data.get("annual_income"),
-        "monthly_expenses": profile_data.get("monthly_expenses"),
-        "home_loan_emi": profile_data.get("home_loan_emi"),
-        "car_loan_emi": profile_data.get("car_loan_emi"),
-        "other_emi": profile_data.get("other_emi"),
-        "existing_mf": profile_data.get("existing_mf"),
-        "existing_ppf": profile_data.get("existing_ppf"),
-        "existing_nps": profile_data.get("existing_nps"),
-        "existing_epf": profile_data.get("existing_epf"),
-        "existing_fd": profile_data.get("existing_fd"),
-        "existing_savings": profile_data.get("existing_savings"),
-        "current_sip": profile_data.get("current_sip"),
         "primary_goal": profile_data.get("primary_goal"),
-        "target_retirement_age": profile_data.get("target_retirement_age"),
-        "target_monthly_draw": profile_data.get("target_monthly_draw"),
         "risk_appetite": profile_data.get("risk_appetite"),
-        "investment_horizon_years": profile_data.get("investment_horizon_years"),
-        "has_term_insurance": profile_data.get("has_term_insurance"),
-        "term_cover_amount": profile_data.get("term_cover_amount"),
-        "has_health_insurance": profile_data.get("has_health_insurance"),
-        "health_cover_amount": profile_data.get("health_cover_amount"),
         "is_metro_city": profile_data.get("is_metro_city"),
         "dependents": profile_data.get("dependents"),
     }
-    compact_profile_str = _compact_json_for_prompt(compact_profile, max_chars=2500)
+    compact_profile_str = _compact_json_for_prompt(compact_profile, max_chars=500)
     cas_summary_str = _summarize_cas_for_prompt(cas_data)
     
     # Generate the 6 months for the plan (current month + 1 onwards)
@@ -425,138 +435,81 @@ def build_planning_tasks(
         _agent_6_synthesizer(planning_llm),
     ]
 
-    # ── Task 1: Data Analysis ─────────────────────────────────
-    # Pre-compute values for the agent
-    monthly_income = profile_data.get("annual_income", 0) / 12
-    monthly_expenses = profile_data.get("monthly_expenses", 0)
-    total_emi = (
-        profile_data.get("home_loan_emi", 0) +
-        profile_data.get("car_loan_emi", 0) +
-        profile_data.get("other_emi", 0)
-    )
-    existing_savings = profile_data.get("existing_savings", 0)
-    
+    # ── Task 1: Data Analysis (uses pre-computed metrics) ─────
     task_1 = Task(
-        description=f"""Analyze the user's financial profile and compute base metrics.
+        description=f"""Review and validate the pre-computed financial metrics for the user.
 
 USER PROFILE:
 {compact_profile_str}
 
-Use the following tools to compute metrics. Each tool takes simple parameters - just pass the values shown:
+{metrics_prompt}
 
-1. calculate_monthly_surplus tool:
-   - monthly_income: {monthly_income:.2f}
-   - monthly_expenses: {monthly_expenses:.2f}
-   - emi_total: {total_emi:.2f}
+Your job is to:
+1. Review the pre-computed metrics above (already calculated)
+2. Flag any concerns (e.g., if savings rate is too low, emergency fund gap is large)
+3. Provide insights based on the user's age, goals, and risk appetite
+4. Suggest priority areas that need attention
 
-2. calculate_debt_to_income tool:
-   - total_emi: {total_emi:.2f}
-   - monthly_income: {monthly_income:.2f}
+DO NOT recalculate these values — they are verified. Focus on ANALYSIS and INSIGHTS.
 
-3. calculate_emergency_fund tool:
-   - monthly_expenses: {monthly_expenses:.2f}
-   - existing_savings: {existing_savings:.2f}
-   - months: 6
-
-4. calculate_net_worth tool:
-   - existing_mf: {profile_data.get("existing_mf", 0)}
-   - existing_ppf: {profile_data.get("existing_ppf", 0)}
-   - existing_epf: {profile_data.get("existing_epf", 0)}
-   - existing_fd: {profile_data.get("existing_fd", 0)}
-   - existing_nps: {profile_data.get("existing_nps", 0)}
-   - existing_savings: {existing_savings}
-
-5. calculate_asset_allocation tool:
-   - age: {profile_data.get("age", 30)}
-   - risk_appetite: {profile_data.get("risk_appetite", "moderate")}
-
-Flag any data inconsistencies (e.g., expenses > income).
-Output a validated financial snapshot with all computed metrics.""",
+Output a brief validated financial snapshot with key insights.""",
         expected_output=(
-            "A validated financial snapshot with: monthly surplus, DTI ratio, "
-            "savings rate, emergency fund status, net worth, and any data flags."
+            "A validated financial snapshot with key insights: surplus assessment, "
+            "DTI concerns, emergency fund priority, and action recommendations."
         ),
         agent=agents[0],
     )
 
-    # ── Task 2: Tax + Insurance Analysis ──────────────────────
-    tax_inputs = {
-        "annual_income": profile_data.get("annual_income", 0),
-        "ppf_contribution": min(profile_data.get("existing_ppf", 0), 150000),
-        "nps_contribution": min(profile_data.get("existing_nps", 0), 50000),
-        "home_loan_interest": profile_data.get("home_loan_interest_annually", 0),
-        "hra_received": profile_data.get("annual_hra_received", 0),
-        "rent_paid": profile_data.get("annual_rent_paid", 0),
-        "is_metro": profile_data.get("is_metro_city", True),
-        "health_insurance_self": 25000 if profile_data.get("has_health_insurance") else 0,
-    }
-
+    # ── Task 2: Tax + Insurance Analysis (uses pre-computed) ──
     task_2 = Task(
-        description=f"""Perform a combined tax and insurance assessment for the user.
+        description=f"""Review the pre-computed tax comparison and insurance gap analysis.
 
 USER PROFILE:
 {compact_profile_str}
 
-Part A — Tax:
-Use the tax_calculator tool with these inputs:
-{json.dumps(tax_inputs, indent=2)}
+{tax_prompt}
 
-Tax output requirements:
-1. Clearly state which regime is better and by how much
-2. List all deductions utilized vs wasted
-3. Recommend tax-saving investments if applicable (categories only, no specific products)
-4. If the user has both home loan + HRA, analyze the interaction
+INSURANCE GAPS (pre-computed):
+Term Insurance: Recommended ₹{precomputed_metrics.term_insurance_recommended:,.0f}, Gap ₹{precomputed_metrics.term_insurance_gap:,.0f}
+Health Insurance: Recommended ₹{precomputed_metrics.health_insurance_recommended:,.0f}, Gap ₹{precomputed_metrics.health_insurance_gap:,.0f}
+Dependents: {profile_data.get('dependents', 0)}
+City: {profile_data.get('city', 'India')} ({"Metro" if profile_data.get('is_metro_city', True) else "Non-metro"})
 
-Part B — Insurance:
-Use the calculate_insurance_gap tool with these parameters:
-- annual_income: {profile_data.get("annual_income", 0)}
-- existing_cover: {profile_data.get("term_cover_amount", 0)}
-- multiplier: 10
+Your job is to:
+1. Explain WHY the recommended tax regime is better
+2. List tax-saving investment CATEGORIES the user should consider (not specific products)
+3. Prioritize insurance gaps (term > health typically)
+4. Provide specific coverage amount recommendations
 
-Health insurance checks:
-- Current cover: {profile_data.get("health_cover_amount", 0)}
-- Recommended minimum: {"₹10L" if profile_data.get("is_metro_city", True) else "₹5L"} for {"metro" if profile_data.get("is_metro_city", True) else "non-metro"} city
-
-Consider:
-- Number of dependents: {profile_data.get('dependents', 0)}
-- City: {profile_data.get('city', 'India')}
-- Age: {profile_data.get('age', 30)}
-
-Provide specific coverage amount recommendations, NOT specific products.""",
+DO NOT recalculate — use the pre-computed values above.""",
         expected_output=(
-            "Combined report containing: tax comparison (old vs new, recommended regime, "
-            "deduction map) and insurance gap analysis (term and health recommended amounts, gaps, "
-            "and prioritized actions)."
+            "Tax regime recommendation with explanation, tax-saving opportunities, "
+            "and prioritized insurance coverage recommendations."
         ),
         agent=agents[1],
         context=[task_1],
     )
 
-    # ── Task 3: Investment Strategy ───────────────────────────
+    # ── Task 3: Investment Strategy (uses pre-computed + cached funds) ───
     cas_instruction = ""
     if cas_data:
         cas_instruction = f"""
 The user has provided CAS (Consolidated Account Statement) data:
 {cas_summary_str}
 
-IMPORTANT: Also run the portfolio_overlap_detector tool with the funds from CAS data.
+IMPORTANT: Run the portfolio_overlap_detector tool with the funds from CAS data.
 Pass the funds as a JSON string in the funds_json parameter.
 Provide consolidation advice if overlap > 25%."""
 
-    # Pre-compute investment-related values
-    years_to_retire = profile_data.get("target_retirement_age", 60) - profile_data.get("age", 30)
-    target_monthly_draw = profile_data.get("target_monthly_draw", 100000)
-    fund_count_instruction = (
-        "top 2 mutual fund options for each category"
-        if compact_output
-        else "top 5 mutual fund options for each category"
-    )
-    monthly_fund_instruction = (
-        "To keep output compact, include detailed fund arrays only in the first month entry; "
-        "for months 2-6, keep fund arrays empty unless absolutely needed."
-        if compact_output
-        else "Include fund arrays in each month entry."
-    )
+    # Format cached fund data for the prompt (no need for tool call)
+    fund_summary = f"""
+CACHED FUND RECOMMENDATIONS (pre-loaded, no tool call needed):
+Large Cap: {len(cached_funds.get('large_cap', []))} options available
+Mid Cap: {len(cached_funds.get('mid_cap', []))} options available
+Small Cap: {len(cached_funds.get('small_cap', []))} options available
+Debt: {len(cached_funds.get('debt', []))} options available
+Gold: {len(cached_funds.get('gold', []))} options available
+"""
     
     task_3 = Task(
         description=f"""Design the investment strategy and month-by-month SIP schedule.
@@ -567,45 +520,32 @@ PLAN MONTHS: {plan_months_str}
 USER PROFILE:
 {compact_profile_str}
 
-Use the following tools with the specified parameters:
+PRE-COMPUTED VALUES (use these directly, do not recalculate):
+- Target Corpus: Rs {precomputed_metrics.corpus_needed:,.0f}
+- Monthly SIP Required: Rs {precomputed_metrics.monthly_sip_required:,.0f}
+- Asset Allocation: Equity {precomputed_metrics.equity_pct}%, Debt {precomputed_metrics.debt_pct}%, Gold {precomputed_metrics.gold_pct}%
+- Years to Retire: {precomputed_metrics.years_to_retire}
 
-1. calculate_asset_allocation tool:
-   - age: {profile_data.get("age", 30)}
-   - risk_appetite: {profile_data.get("risk_appetite", "moderate")}
-
-2. calculate_retirement_corpus tool:
-   - monthly_draw_today: {target_monthly_draw}
-   - years_to_retire: {years_to_retire}
-   - inflation_pct: 6.5
-   - swr_pct: 4.0
-
-3. calculate_sip_required tool (use corpus result from above):
-   - target_amount: <corpus_from_retirement_corpus_result>
-   - rate_pct: 12
-   - years: {profile_data.get("investment_horizon_years", 10)}
-
-4. get_all_fund_recommendations tool:
-   - Call this to get {fund_count_instruction}
-   - These will be included in the monthly plan entries
+{fund_summary}
 {cas_instruction}
 
-Then create a month-by-month SIP allocation table for exactly 6 months: {plan_months_str}
-Split SIP across: large_cap, mid_cap, small_cap, debt, gold, PPF, NPS.
-
-IMPORTANT TO REDUCE CONTEXT SIZE:
-- In this Task 4 output, include ONE shared "fund_options_by_category" block (top 5 each).
-- Do NOT repeat full fund option lists for every month in Task 4 output.
-- These are educational options showing historical performance; user decides what to invest in.
-- {monthly_fund_instruction}
+Create a month-by-month SIP allocation table for exactly 6 months: {plan_months_str}
+Split the monthly SIP of Rs {precomputed_metrics.monthly_sip_required:,.0f} across:
+- Large Cap: {precomputed_metrics.equity_pct * 0.4:.0f}% of equity allocation
+- Mid Cap: {precomputed_metrics.equity_pct * 0.25:.0f}% of equity allocation  
+- Small Cap: {precomputed_metrics.equity_pct * 0.14:.0f}% of equity allocation
+- Debt: {precomputed_metrics.debt_pct}%
+- Gold: {precomputed_metrics.gold_pct}%
+- PPF: Max Rs 12,500/month (Rs 1,50,000/year limit)
+- NPS: Max Rs 4,167/month (Rs 50,000/year limit under 80CCD(1B))
 
 CRITICAL RULES:
-- PPF contribution MUST NOT exceed ₹12,500/month (₹1,50,000/year limit)
-- NPS 80CCD(1B) MUST NOT exceed ₹50,000/year
+- PPF contribution MUST NOT exceed Rs 12,500/month (Rs 1,50,000/year limit)
+- NPS 80CCD(1B) MUST NOT exceed Rs 50,000/year
 - Fund options are EDUCATIONAL - include disclaimer about past performance""",
         expected_output=(
-            "Complete investment strategy: target corpus, monthly SIP total, "
-            "asset allocation, 6-month SIP schedule, and ONE shared fund_options_by_category "
-            "block (large/mid/small/debt/gold), "
+            "Complete investment strategy: monthly SIP breakdown by category, "
+            "6-month SIP schedule with PPF/NPS contributions, "
             "and portfolio overlap analysis if CAS data was available."
         ),
         agent=agents[2],
@@ -617,14 +557,14 @@ CRITICAL RULES:
         description=f"""Review ALL previous agent outputs for regulatory compliance.
 
 Check each of the following:
-1. ✅ Fund recommendations are presented as EDUCATIONAL OPTIONS with historical data
-   → Verify they include disclaimers about past performance
-2. ❌ Are PPF contributions exceeding ₹1.5L/year or NPS exceeding ₹50K/year?
-   → If yes, flag for correction.
-3. ❌ Do tax calculations use correct FY 2025-26 slabs?
-4. ✅ Does the plan include the SEBI disclaimer? The required text is:
+1. Fund recommendations are presented as EDUCATIONAL OPTIONS with historical data
+   - Verify they include disclaimers about past performance
+2. Are PPF contributions exceeding Rs 1.5L/year or NPS exceeding Rs 50K/year?
+   - If yes, flag for correction.
+3. Do tax calculations use correct FY 2025-26 slabs?
+4. Does the plan include the SEBI disclaimer? The required text is:
    "{SEBI_DISCLAIMER}"
-5. ✅ Does every recommendation explain WHY (educational value)?
+5. Does every recommendation explain WHY (educational value)?
 
 If ANY violations are found, clearly list corrections needed.
 If all checks pass, confirm compliance and output the disclaimer text.""",
@@ -636,56 +576,59 @@ If all checks pass, confirm compliance and output the disclaimer text.""",
         context=[task_1, task_2, task_3],
     )
 
-    # ── Task 5: Plan Synthesis ────────────────────────────────
+    # ── Task 5: Plan Synthesis (uses cached funds) ────────────
+    # Format fund options for direct inclusion (no tool call needed)
+    fund_options_json = json.dumps(cached_funds, indent=2, default=str)
+    
     task_5 = Task(
         description=f"""Synthesize ALL previous agent outputs into a single FinancialPlan JSON.
 
 PLAN MONTHS: {plan_months_str}
 CURRENT TIMESTAMP: {current_timestamp}
 
-Combine:
+PRE-COMPUTED VALUES TO USE:
+- Target Corpus: {precomputed_metrics.corpus_needed}
+- Monthly SIP Total: {precomputed_metrics.monthly_sip_required}
+- Asset Allocation: Equity {precomputed_metrics.equity_pct}%, Debt {precomputed_metrics.debt_pct}%, Gold {precomputed_metrics.gold_pct}%
+
+TAX COMPARISON:
+- Old Regime Tax: {precomputed_tax['old_regime_tax']}
+- New Regime Tax: {precomputed_tax['new_regime_tax']}
+- Recommended: {precomputed_tax['recommended_regime']}
+- Savings: {precomputed_tax['savings_amount']}
+
+INSURANCE GAPS:
+- Term: Recommended {precomputed_metrics.term_insurance_recommended}, Gap {precomputed_metrics.term_insurance_gap}
+- Health: Recommended {precomputed_metrics.health_insurance_recommended}, Gap {precomputed_metrics.health_insurance_gap}
+
+CACHED FUND OPTIONS (use these directly, DO NOT call get_all_fund_recommendations):
+{fund_options_json}
+
+Combine insights from:
 - Financial snapshot from Agent 1
-- Combined tax + insurance analysis from Agent 2
-- Investment strategy + monthly SIP schedule + shared FUND OPTIONS from Agent 3
-- Compliance review + disclaimer from Agent 4
+- Tax + insurance recommendations from Agent 2
+- Investment strategy + monthly SIP schedule from Agent 3
+- Compliance review from Agent 4
 
 The output MUST follow the FinancialPlan schema exactly.
 
 CRITICAL REQUIREMENTS:
 1. Include exactly 6 MonthlyPlanEntry items for months: {plan_months_str}
-   Each MonthlyPlanEntry contains: month, sip amounts, ppf/nps contributions, equity_pct, debt_pct, notes
-   
-2. Include fund_options at the PLAN LEVEL (not per month) with:
-   - large_cap_funds: 3 educational options
-   - mid_cap_funds: 3 educational options
-   - small_cap_funds: 3 educational options  
-   - debt_funds: 3 educational options
-   - gold_funds: 3 educational options
-   
-   Use the get_all_fund_recommendations tool to get these fund options.
-   Each fund recommendation must include all required schema fields.
-
+2. Use the CACHED FUND OPTIONS above for fund_options (top 3 per category)
 3. Set plan_start_month to "{plan_months[0]}"
 4. Set plan_generated_at to "{current_timestamp}"
-5. Include the SEBI disclaimer: "{SEBI_DISCLAIMER}"
+5. Include the SEBI disclaimer
 6. Include educational_notes explaining WHY for each recommendation
-7. Set scenario_type to the appropriate value
+7. Set scenario_type to "custom"
 8. Include confidence_notes listing assumptions and limitations
 9. Include assumptions dict with return rates, inflation, SWR used
 
-OUTPUT SIZE: Keep the JSON concise. Fund options are shared once at plan level.
-
-Before returning final JSON, self-check and fix failures:
-- It contains "not a SEBI-registered" OR "educational guidance" in disclaimer text.
-- Fund recommendations are in fund_options (not repeated per month).
-- monthly_plan has exactly 6 entries for months: {plan_months_str}.
-
-Every numerical value must come from the calculator tools — do not invent numbers.""",
+OUTPUT: Return valid JSON matching FinancialPlan schema. No markdown code blocks.""",
         expected_output="A complete FinancialPlan JSON matching the Pydantic schema with fund_options.",
         agent=agents[4],
         context=[task_1, task_2, task_3, task_4],
         output_pydantic=FinancialPlan,
-        guardrail=validate_financial_plan,  # Functional guardrail - more reliable than string
+        guardrail=validate_financial_plan,
     )
 
     return agents, [task_1, task_2, task_3, task_4, task_5]
