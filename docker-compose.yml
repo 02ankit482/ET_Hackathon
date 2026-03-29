@@ -1,0 +1,33 @@
+version: "3.9"
+
+services:
+  finance-rag:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: finance-rag:latest
+    container_name: finance_advisor
+    ports:
+      - "8000:8000"
+    environment:
+      # ── Required ──────────────────────────────────────────────
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      # ── Optional overrides ────────────────────────────────────
+      - GEMINI_MAX_OUTPUT_TOKENS=${GEMINI_MAX_OUTPUT_TOKENS:-5000}
+      - GEMINI_CONTEXT_MAX_HIT_CHARS=${GEMINI_CONTEXT_MAX_HIT_CHARS:-2500}
+      - GEMINI_CONTEXT_MAX_TOTAL_CHARS=${GEMINI_CONTEXT_MAX_TOTAL_CHARS:-9000}
+    volumes:
+      # Persist the vector database between runs
+      - chroma_data:/app/chroma_db
+      # Mount your documents folder so you can add PDFs without rebuilding
+      - ./documents:/app/documents
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  chroma_data:
