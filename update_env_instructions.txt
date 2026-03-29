@@ -1,9 +1,0 @@
-IMPORTANT: Update your .env file
-
-Change this line:
-  GOOGLE_API_KEY=AIzaSyCpN-oElXaWPH32mOyXo1sLekoyCkpqsCo
-
-To this:
-  GEMINI_API_KEY=AIzaSyCpN-oElXaWPH32mOyXo1sLekoyCkpqsCo
-
-CrewAI expects GEMINI_API_KEY for direct Gemini calls.
