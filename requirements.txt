@@ -59,6 +59,7 @@ opentelemetry-instrumentation-fastapi==0.61b0
 # ── HTTP ──────────────────────────────────────────────────────
 httpx==0.28.1
 json_repair
+appdirs
 aiohttp==3.13.3
 
 # ── Utilities ─────────────────────────────────────────────────
