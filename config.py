@@ -35,16 +35,17 @@ MONGODB_DATABASE = os.getenv("MONGODB_DATABASE", "everything_money")
 # ── CrewAI LLM Config ────────────────────────────────────────
 # Using DeepSeek via OpenRouter for structured output support
 # DeepSeek has better rate limits than Gemini and handles Dict fields properly
-PLANNING_LLM = "openrouter/deepseek/deepseek-chat"  # For all 6 planning agents
+PLANNING_LLM = "openrouter/deepseek/deepseek-chat"  # For all 5 planning agents
 CHAT_LLM = "openrouter/deepseek/deepseek-chat"      # For chat agent
-CHAT_MAX_TOKENS_DEFAULT = int(os.getenv("CHAT_MAX_TOKENS_DEFAULT", "16000"))
+CHAT_MAX_TOKENS_DEFAULT = int(os.getenv("CHAT_MAX_TOKENS_DEFAULT", "4000"))
 CHAT_RETRY_TOKEN_BUFFER = int(os.getenv("CHAT_RETRY_TOKEN_BUFFER", "256"))
-# Increased from 8192 - FinancialPlan schema with 6 months × 5 categories × funds
-# requires more tokens for complete JSON structured output
-PLANNING_MAX_TOKENS_DEFAULT = int(os.getenv("PLANNING_MAX_TOKENS_DEFAULT", "16384"))
+# Reduced from 16384 to 12288 to avoid hitting OpenRouter credit limits
+# FinancialPlan schema with 6 months × 5 categories × funds requires significant tokens
+# but we've optimized by pre-computing metrics and caching fund data
+PLANNING_MAX_TOKENS_DEFAULT = int(os.getenv("PLANNING_MAX_TOKENS_DEFAULT", "12288"))
 PLANNING_RETRY_TOKEN_BUFFER = int(os.getenv("PLANNING_RETRY_TOKEN_BUFFER", "256"))
 PLANNING_RETRY_MAX_TOKENS_ON_TRUNCATION = int(
-    os.getenv("PLANNING_RETRY_MAX_TOKENS_ON_TRUNCATION", "12288")
+    os.getenv("PLANNING_RETRY_MAX_TOKENS_ON_TRUNCATION", "10240")
 )
 
 # ── Vector Store ──────────────────────────────────────────────

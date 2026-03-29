@@ -10,9 +10,12 @@ import json
 import tempfile
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
+import asyncio
+from typing import AsyncGenerator
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from config import BASE_DIR, SEBI_DISCLAIMER
@@ -23,6 +26,7 @@ from database import (
 from models import OnboardingRequest, ChatRequest, FinancialPlan, ChatResponse, InitUserRequest
 from flows.advisor_flow import generate_plan, handle_chat
 from cas_parser import parse_cas_pdf, extract_mf_summary
+from event_logger import get_event_logger, cleanup_event_logger
 
 
 # ── App Lifespan ──────────────────────────────────────────────
@@ -68,8 +72,52 @@ async def root():
             "GET  /api/chat/history/{user_id}",
             "GET  /api/profile/{user_id}",
             "PUT  /api/profile/{user_id}",
+            "GET  /api/events/stream/{session_id}",
         ],
     }
+
+
+# ── SSE Event Streaming ───────────────────────────────────────
+
+@app.get("/api/events/stream/{session_id}")
+async def stream_events(session_id: str, background_tasks: BackgroundTasks):
+    """
+    Server-Sent Events (SSE) endpoint for real-time CrewAI event streaming.
+    
+    Usage:
+        const eventSource = new EventSource(`/api/events/stream/${sessionId}`);
+        eventSource.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            // Handle event: crew_started, task_started, agent_started, etc.
+        };
+    """
+    event_logger = get_event_logger(session_id)
+    
+    async def event_generator() -> AsyncGenerator[str, None]:
+        """Generate SSE-formatted event stream."""
+        try:
+            async for event in event_logger.event_stream():
+                # SSE format: "data: {json}\n\n"
+                yield f"data: {json.dumps(event)}\n\n"
+                await asyncio.sleep(0)  # Allow other tasks to run
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            import logging
+            logging.error(f"SSE stream error: {e}", exc_info=True)
+        finally:
+            # Cleanup when client disconnects
+            background_tasks.add_task(cleanup_event_logger, session_id)
+    
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # Disable nginx buffering
+        },
+    )
 
 
 # ── Session / Onboarding ─────────────────────────────────────
@@ -179,7 +227,7 @@ async def parse_cas(
 # ── Plan Generation ───────────────────────────────────────────
 
 @app.post("/api/plan/generate")
-async def generate_plan_endpoint(user_id: str = Form(...)):
+async def generate_plan_endpoint(user_id: str = Form(...), session_id: str = Form(None)):
     """Generate a financial plan for the user."""
     from bson import ObjectId
 
@@ -191,6 +239,12 @@ async def generate_plan_endpoint(user_id: str = Form(...)):
     profile_data = user.get("profile", {})
     cas_data = user.get("cas_data")
     plans_collection = get_collection(PLANS_COLLECTION)
+    
+    # Get event logger if session_id provided (for SSE streaming)
+    event_callback = None
+    if session_id:
+        event_logger = get_event_logger(session_id)
+        event_callback = event_logger.callback
 
     try:
         plan = await generate_plan(
@@ -198,6 +252,7 @@ async def generate_plan_endpoint(user_id: str = Form(...)):
             cas_data=cas_data,
             db_collection=plans_collection,
             user_id=user_id,
+            event_callback=event_callback,
         )
         return {
             "success": True,
@@ -209,7 +264,7 @@ async def generate_plan_endpoint(user_id: str = Form(...)):
 
 
 @app.post("/api/plan/regenerate")
-async def regenerate_plan(user_id: str = Form(...)):
+async def regenerate_plan(user_id: str = Form(...), session_id: str = Form(None)):
     """Regenerate plan after profile changes (triggered by chat)."""
     from bson import ObjectId
 
@@ -221,6 +276,12 @@ async def regenerate_plan(user_id: str = Form(...)):
     profile_data = user.get("profile", {})
     cas_data = user.get("cas_data")
     plans_collection = get_collection(PLANS_COLLECTION)
+    
+    # Get event logger if session_id provided (for SSE streaming)
+    event_callback = None
+    if session_id:
+        event_logger = get_event_logger(session_id)
+        event_callback = event_logger.callback
 
     try:
         plan = await generate_plan(
@@ -228,6 +289,7 @@ async def regenerate_plan(user_id: str = Form(...)):
             cas_data=cas_data,
             db_collection=plans_collection,
             user_id=user_id,
+            event_callback=event_callback,
         )
         return {
             "success": True,
@@ -278,6 +340,12 @@ async def chat_endpoint(req: ChatRequest):
     # Get chat history
     chat_doc = await chat_collection.find_one({"user_id": ObjectId(req.user_id)})
     chat_history = chat_doc.get("messages", []) if chat_doc else []
+    
+    # Get event logger if session_id provided (for SSE streaming)
+    event_callback = None
+    if req.session_id:
+        event_logger = get_event_logger(req.session_id)
+        event_callback = event_logger.callback
 
     try:
         response = await handle_chat(
@@ -286,6 +354,7 @@ async def chat_endpoint(req: ChatRequest):
             profile_data=profile_data,
             chat_history=chat_history,
             chat_collection=chat_collection,
+            event_callback=event_callback,
         )
         return {
             "success": True,

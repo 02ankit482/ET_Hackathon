@@ -639,6 +639,7 @@ def create_planning_crew(
     cas_data: dict | None = None,
     max_tokens: int | None = None,
     compact_output: bool = False,
+    event_callback=None,
 ) -> Crew:
     """Create and return the configured Planning Crew."""
     agents, tasks = build_planning_tasks(
@@ -648,9 +649,12 @@ def create_planning_crew(
         compact_output=compact_output,
     )
 
+    # Register step_callback and task_callback instead of generic callbacks
     return Crew(
         agents=agents,
         tasks=tasks,
         process=Process.sequential,
         verbose=True,
+        step_callback=event_callback,
+        task_callback=event_callback,
     )

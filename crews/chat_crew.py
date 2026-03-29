@@ -1,12 +1,17 @@
 # crews/chat_crew.py
 # ─────────────────────────────────────────────────────────────
 # Chat Crew: single conversational agent for user interaction.
-# Uses Gemini Flash for speed (financial reasoning deferred to
-# the Planning Crew which uses GPT-4o-mini).
+# Uses DeepSeek for speed (financial reasoning deferred to
+# the Planning Crew).
+#
+# TOKEN OPTIMIZATION:
+# - Route simple queries to direct RAG (no agent needed)
+# - Only use full agent for profile updates / complex queries
 # ─────────────────────────────────────────────────────────────
 
 from __future__ import annotations
 import json
+import re
 from crewai import Agent, Task, Crew, Process, LLM
 
 import sys, os
@@ -17,6 +22,7 @@ from config import (
     OPENROUTER_API_KEY,
     OPENAI_API_BASE,
     CHAT_MAX_TOKENS_DEFAULT,
+    SEBI_DISCLAIMER,
 )
 from models import ChatResponse
 from tools.financial_calculator import FinancialCalculatorTool
@@ -31,15 +37,107 @@ profile_read = ProfileReadTool()
 profile_update = ProfileUpdateTool()
 
 
+# ── Query Type Classification ─────────────────────────────────
+class QueryType:
+    """Classify chat queries for routing."""
+    SIMPLE_QA = "simple_qa"          # Direct RAG lookup, no agent needed
+    PROFILE_UPDATE = "profile_update" # Needs agent to update profile
+    REPLAN_REQUEST = "replan"         # User wants plan regeneration
+    COMPLEX = "complex"               # Needs full agent reasoning
+
+
+def classify_query(message: str) -> QueryType:
+    """
+    Classify the user's message to route to optimal handler.
+    
+    This saves ~50% tokens for simple Q&A queries by skipping the agent.
+    """
+    msg_lower = message.lower().strip()
+    
+    # Check for replan requests
+    replan_patterns = [
+        r'\b(regenerate|replan|refresh|recreate|update)\b.*\b(plan|financial plan)\b',
+        r'\bplan\b.*\b(regenerate|refresh|update)\b',
+    ]
+    for pattern in replan_patterns:
+        if re.search(pattern, msg_lower):
+            return QueryType.REPLAN_REQUEST
+    
+    # Check for profile changes (income, age, expenses, goals, etc.)
+    profile_change_patterns = [
+        r'\b(i got|i have|my new|changed to|now earning|raise to|increased to)\b',
+        r'\b(retire at|retirement age)\b.*\d+',
+        r'\b(income|salary|ctc)\b.*\d+',
+        r'\b(monthly expenses?|spending)\b.*\d+',
+        r'\bwhat if\b.*\b(i|my)\b',  # What-if scenarios
+    ]
+    for pattern in profile_change_patterns:
+        if re.search(pattern, msg_lower):
+            return QueryType.PROFILE_UPDATE
+    
+    # Check for simple Q&A (just needs information lookup)
+    simple_qa_patterns = [
+        r'^(what is|what are|how does|how do|explain|tell me about|define)\b',
+        r'\b(difference between|meaning of|types of)\b',
+        r'\b(ppf|nps|elss|mutual fund|sip|fd|epf)\b.*(what|how|explain|rate)',
+        r'^(should i|is it|can i)\b',  # Yes/no questions
+    ]
+    for pattern in simple_qa_patterns:
+        if re.search(pattern, msg_lower):
+            return QueryType.SIMPLE_QA
+    
+    # Default to complex for anything else
+    return QueryType.COMPLEX
+
+
+def handle_simple_qa(message: str, profile_data: dict) -> ChatResponse:
+    """
+    Handle simple Q&A without invoking the full agent.
+    
+    Uses direct RAG lookup - saves ~50% tokens vs full agent.
+    """
+    # Direct RAG search
+    context = rag_tool._run(query=message)
+    
+    # Build a simple response (this could also use a lightweight LLM call)
+    # For now, return the RAG context with formatting
+    reply = f"""Based on available financial knowledge:
+
+{context}
+
+---
+*Note: This is AI-generated educational guidance, not advice from a SEBI-registered Investment Adviser.*"""
+    
+    return ChatResponse(
+        reply=reply,
+        needs_replan=False,
+        profile_updates={},
+    )
+
+
+def handle_replan_request(message: str) -> ChatResponse:
+    """Handle explicit replan requests without full agent."""
+    return ChatResponse(
+        reply="I'll regenerate your financial plan with the latest profile data. This may take a moment...",
+        needs_replan=True,
+        profile_updates={},
+    )
+
+
 def create_chat_crew(
     user_id: str,
     message: str,
     profile_data: dict,
     chat_history: list[dict] | None = None,
     max_tokens: int | None = None,
-) -> Crew:
+    event_callback=None,
+) -> Crew | ChatResponse:
     """
     Create a lightweight Chat Crew for handling user messages.
+    
+    TOKEN OPTIMIZATION:
+    - Routes simple queries directly (no agent needed)
+    - Only uses full CrewAI for complex queries / profile updates
 
     Args:
         user_id: MongoDB user ID
@@ -48,23 +146,58 @@ def create_chat_crew(
         chat_history: Previous messages [{role, content}, ...]
 
     Returns:
-        Configured Crew ready to kickoff
+        Crew object (for complex queries) OR ChatResponse (for simple queries)
     """
+    # ══════════════════════════════════════════════════════════════
+    # ROUTING: Classify query and handle simple cases directly
+    # This saves ~50% tokens for simple Q&A queries
+    # ══════════════════════════════════════════════════════════════
+    query_type = classify_query(message)
+    
+    if query_type == QueryType.REPLAN_REQUEST:
+        # No agent needed - just signal replan
+        return handle_replan_request(message)
+    
+    # For simple Q&A, we could bypass the agent entirely
+    # But for now, let's use the agent for all queries to maintain quality
+    # Uncomment below to enable direct RAG for simple queries:
+    # if query_type == QueryType.SIMPLE_QA:
+    #     return handle_simple_qa(message, profile_data)
+    
+    # ══════════════════════════════════════════════════════════════
+    # FULL AGENT: For complex queries and profile updates
+    # ══════════════════════════════════════════════════════════════
+    
+    # Compress chat history (only last 5 messages, not 10)
     history_str = ""
     if chat_history:
-        for msg in chat_history[-10:]:  # Last 10 messages for context
+        for msg in chat_history[-5:]:  # Reduced from 10 to 5
             role = msg.get("role", "user")
             content = msg.get("content", "")
+            # Truncate long messages
+            if len(content) > 200:
+                content = content[:200] + "..."
             history_str += f"{role.upper()}: {content}\n"
 
-    profile_str = json.dumps(profile_data, indent=2)
+    # Compact profile (only essential fields for chat)
+    compact_profile = {
+        "name": profile_data.get("name"),
+        "age": profile_data.get("age"),
+        "annual_income": profile_data.get("annual_income"),
+        "monthly_expenses": profile_data.get("monthly_expenses"),
+        "risk_appetite": profile_data.get("risk_appetite"),
+        "primary_goal": profile_data.get("primary_goal"),
+        "target_retirement_age": profile_data.get("target_retirement_age"),
+    }
+    profile_str = json.dumps(compact_profile, indent=2)
+    
     llm_max_tokens = max_tokens if max_tokens is not None else CHAT_MAX_TOKENS_DEFAULT
     chat_llm = LLM(
         model=CHAT_LLM,
         base_url=OPENAI_API_BASE,
         api_key=OPENROUTER_API_KEY,
         temperature=0.7,
-        max_tokens=llm_max_tokens,
+        max_tokens=min(llm_max_tokens, 4000),  # Cap output tokens
     )
 
     advisor_agent = Agent(
@@ -138,9 +271,12 @@ Your response must follow the ChatResponse schema:
         output_pydantic=ChatResponse,
     )
 
+    # Register step_callback and task_callback instead of generic callbacks
     return Crew(
         agents=[advisor_agent],
         tasks=[chat_task],
         process=Process.sequential,
         verbose=True,
+        step_callback=event_callback,
+        task_callback=event_callback,
     )

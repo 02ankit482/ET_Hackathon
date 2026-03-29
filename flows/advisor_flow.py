@@ -69,6 +69,7 @@ async def generate_plan(
     cas_data: dict | None = None,
     db_collection=None,
     user_id: str | None = None,
+    event_callback=None,
 ) -> FinancialPlan:
     """
     Run the Planning Crew to generate a full financial plan.
@@ -78,6 +79,7 @@ async def generate_plan(
         cas_data: Parsed CAS PDF data (optional)
         db_collection: MongoDB plans collection (optional, for persistence)
         user_id: User's MongoDB _id string (for linking plan to user)
+        event_callback: Optional callback for capturing crew events (for SSE streaming)
 
     Returns:
         FinancialPlan Pydantic model
@@ -87,21 +89,21 @@ async def generate_plan(
     compact_output = False
     result = None
 
-    # Use kickoff_async() since we're already in an async context (FastAPI/uvicorn)
-    # This avoids "asyncio.run() cannot be called from a running event loop" error
-    # that occurs when guardrails try to validate using async operations
-    for attempt in range(3):
+    # Retry mechanism: up to 5 attempts with progressive token reduction
+    # This handles both "length limit" errors and OpenRouter credit limit errors
+    for attempt in range(5):  # Increased from 3 to 5 for better resilience
         try:
             crew = create_planning_crew(
                 profile_data,
                 cas_data,
                 max_tokens=current_max_tokens,
                 compact_output=compact_output,
+                event_callback=event_callback,
             )
             result = await crew.kickoff_async()
             break
         except Exception as exc:
-            if attempt == 2:
+            if attempt == 4:  # Last attempt (0,1,2,3,4)
                 raise
 
             error_text = str(exc)
@@ -110,14 +112,19 @@ async def generate_plan(
             next_compact_output = compact_output
 
             if affordable_tokens is not None:
-                next_max_tokens = max(512, affordable_tokens - PLANNING_RETRY_TOKEN_BUFFER)
+                # OpenRouter credit limit: be aggressive with reduction
+                # Use a larger buffer to ensure we stay under the limit
+                buffer = max(PLANNING_RETRY_TOKEN_BUFFER, int(affordable_tokens * 0.05))  # 5% buffer
+                next_max_tokens = max(512, affordable_tokens - buffer)
                 next_compact_output = True
             elif _is_length_limit_error(error_text):
                 if not compact_output:
                     next_compact_output = True
                     next_max_tokens = min(current_max_tokens, PLANNING_RETRY_MAX_TOKENS_ON_TRUNCATION)
                 else:
-                    next_max_tokens = max(1024, current_max_tokens - 1024)
+                    # More aggressive reduction on subsequent retries
+                    reduction = 2048 if attempt < 2 else 1024
+                    next_max_tokens = max(1024, current_max_tokens - reduction)
             else:
                 raise
 
@@ -208,6 +215,7 @@ async def handle_chat(
     profile_data: dict,
     chat_history: list[dict] | None = None,
     chat_collection=None,
+    event_callback=None,
 ) -> ChatResponse:
     """
     Run the Chat Crew to handle a user message.
@@ -218,6 +226,7 @@ async def handle_chat(
         profile_data: Current user profile dict
         chat_history: Previous messages
         chat_collection: MongoDB chat_history collection (for persistence)
+        event_callback: Optional callback for capturing crew events (for SSE streaming)
 
     Returns:
         ChatResponse with reply, needs_replan flag, and profile_updates
@@ -229,6 +238,7 @@ async def handle_chat(
         profile_data,
         chat_history,
         max_tokens=requested_max_tokens,
+        event_callback=event_callback,
     )
     # Use kickoff_async() since we're already in an async context (FastAPI/uvicorn)
     try:
@@ -256,6 +266,7 @@ async def handle_chat(
             profile_data,
             chat_history,
             max_tokens=retry_max_tokens,
+            event_callback=event_callback,
         )
         result = await retry_crew.kickoff_async()
 

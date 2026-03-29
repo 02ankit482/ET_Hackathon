@@ -303,6 +303,7 @@ class ChatRequest(BaseModel):
     """Request body for chat endpoint."""
     user_id: str
     message: str
+    session_id: Optional[str] = None  # For SSE event streaming
 
 
 class InitUserRequest(BaseModel):
