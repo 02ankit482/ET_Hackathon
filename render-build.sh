@@ -66,6 +66,7 @@ pip install --force-reinstall --no-deps \
 # Pin protobuf last — nothing above will re-pull it because
 # we used --no-deps on all otel packages above.
 pip install --force-reinstall "protobuf==4.25.8"
+pip install "Deprecated==1.3.1"
 
 echo "==> Setting up frontend directory …"
 mkdir -p frontend
